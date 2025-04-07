@@ -1,0 +1,108 @@
+#!/bin/sh
+
+die () {
+    echo >&2 "$@"
+    exit 1
+}
+
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+QUALITY="3"
+HEIGHT=
+WIDTH=
+SCALE=1
+OUTPUT=
+
+read -r -d '' USAGE << EOM
+Turn videos into GIFs\n
+\n
+USAGE\n
+\ttogif $0 [-w width] [-h height] [-s scale] [-q quality] [-o output file] [file...]"\n
+\n
+FLAGS\n
+\t-w:   output width in pixels\n
+\t-h:   output height in pixels\n
+\t-s:   scale output based on file input (0.5 will make GIF half the dimensions of original). Overrides height and width\n
+\t-q:   quality (1,2, or 3). Level determines how much optimization is done; higher levels take longer, but may have better results\n
+\t-o:   output file\n
+
+EOM
+
+while getopts ":w:h:q:s:o:" opt; do
+    case "$opt" in
+        w) 
+            WIDTH=$OPTARG
+            ;;
+        h)  
+            HEIGHT=$OPTARG
+            ;;
+        s)
+            SCALE=$OPTARG
+            ;;
+        q)  
+            QUALITY=$OPTARG
+            ;;
+        o)
+            OUTPUT=$OPTARG
+            ;;
+        ?)  
+            die $USAGE
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+[ "${1:-}" = "--" ] && shift
+
+[ -z "$1" ] && die $USAGE
+
+if command -v ffmpeg >/dev/null 2>&1 ; then
+    echo "ffmpeg found (version: $(ffmpeg -version | sed -n "s/ffmpeg version \([-0-9.]*\).*/\1/p;"))"
+else
+    die "Error: ffmpeg not found. \n  Install with 'brew install ffmpeg'"
+fi
+
+if command -v gifsicle >/dev/null 2>&1 ; then
+    echo "gifsicle found. (version: $(gifsicle --version | sed -n "s/LCDF Gifsicle \([0-9.]*\).*/\1/p;"))"
+else
+    die "Error: gifsicle not found. \n  Install with 'brew install gifsicle'"
+fi
+
+echo ""
+
+FILE_INFO=$(ffprobe -v quiet -print_format json -show_format -show_streams $1)
+FILE_HEIGHT=$(echo $FILE_INFO | sed -E 's/.*"height":"?([^,"]*)"?.*/\1/')
+FILE_WIDTH=$(echo $FILE_INFO | sed -E 's/.*"width":"?([^,"]*)"?.*/\1/')
+
+if [ -z "$HEIGHT" ] ; then
+    HEIGHT=$FILE_HEIGHT
+fi
+
+if [ -z "$WIDTH" ] ; then
+    WIDTH=$FILE_WIDTH
+fi
+
+if [ -z "$OUTPUT" ] ; then
+    NEW_FILE_PATH=$(echo "$1" | sed -E 's/\.[^.].+$/.gif/;')
+else
+    NEW_FILE_PATH=$OUTPUT
+fi
+
+echo "Creating '$NEW_FILE_PATH' from '$1'($(du -h "$1" | cut -f1 | awk '{$1=$1};1'))"
+
+RESIZE=
+FILTER_SCALE=
+
+if [ -z "$SCALE" ] ; then
+    RESIZE="-s ${WIDTH}x${HEIGHT}"
+else
+    NEW_WIDTH=$(echo "$WIDTH * $SCALE" | bc)
+    FILTER_SCALE="scale=$NEW_WIDTH:-1,"
+fi
+
+# ffmpeg -i $1 -vf scale=600:-1 -sws_flags lanczos -pix_fmt rgb24 -r 20 -f gif - | gifsicle --optimize=3 --delay=$QUALITY > $new_file_path
+cmd="ffmpeg -i $1 -filter_complex \"[0:v] ${FILTER_SCALE}framestep=2,split [a][b];[a] palettegen=stats_mode=diff [p];[b][p] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle\" ${RESIZE} -f gif - | gifsicle --optimize=$QUALITY --delay=6 > $NEW_FILE_PATH"
+
+echo "Exectuing: '$cmd'"
+
+eval "$cmd"
